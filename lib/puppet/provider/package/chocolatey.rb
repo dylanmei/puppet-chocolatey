@@ -9,8 +9,11 @@ Puppet::Type.type(:package).provide(:chocolatey, :parent => Puppet::Provider::Pa
     confine    :operatingsystem => :windows
 
   has_feature :installable, :uninstallable, :upgradeable, :versionable, :install_options
-  chocopath = ENV['ChocolateyInstall'] || 'C:\Chocolatey'
-  commands :chocolatey => chocopath + "/chocolateyInstall/chocolatey.cmd"
+  commands :chocolatey => "#{ENV['ChocolateyInstall']}\\chocolateyInstall\\chocolatey.cmd"
+
+  def print()
+    notice("The value is: '${name}'")
+  end
 
   def install
     should = @resource.should(:ensure)
@@ -19,11 +22,11 @@ Puppet::Type.type(:package).provide(:chocolatey, :parent => Puppet::Provider::Pa
       args = "install", @resource[:name][/\A\S*/], resource[:install_options]
     else
       # Add the package version
-      args = "install", @resource[:name][/\A\S*/], "-version", resource[:ensure], resource[:install_options]
+      args = "install", @resource[:name][/\A\S*/], "-version", @resource[:ensure], @resource[:install_options]
     end
 
     if @resource[:source]
-      args << "-source" << resource[:source]
+      args << "-source" << @resource[:source]
     end
 
     chocolatey(*args)
@@ -35,10 +38,10 @@ Puppet::Type.type(:package).provide(:chocolatey, :parent => Puppet::Provider::Pa
   end
 
   def update
-    args = "update", @resource[:name][/\A\S*/], resource[:install_options]
+    args = "update", @resource[:name][/\A\S*/], @resource[:install_options]
 
     if @resource[:source]
-      args << "-source" << resource[:source]
+      args << "-source" << @resource[:source]
     end
 
     chocolatey(*args)
@@ -52,8 +55,7 @@ Puppet::Type.type(:package).provide(:chocolatey, :parent => Puppet::Provider::Pa
   # the resource the method is called on. 
   # Query provides the information for the single package identified by @Resource[:name]. 
 
-    def query
-
+  def query
     self.class.instances.each do |provider_chocolatey|
       return provider_chocolatey.properties if @resource[:name][/\A\S*/] == provider_chocolatey.name
     end
@@ -61,72 +63,40 @@ Puppet::Type.type(:package).provide(:chocolatey, :parent => Puppet::Provider::Pa
   end
 
   def self.listcmd
-    [command(:chocolatey), ' version all -lo ^| % { \"{0}=={1}\" -f $_.Name, $_.Found }']
+    [command(:chocolatey), ' version all -lo | findstr /R "^[^name]" | findstr /R "^[^---]"']
   end
 
   def self.instances
     packages = []
+    execpipe(listcmd()) do |process|
+      break if process.eof?
 
-    begin
-      execpipe(listcmd()) do |process|
-
-        regex = %r{^([^=]+)==([^=]+)$}
-        fields = [:name, :ensure]
-        hash = {}
-
-        process.each_line { |line|
-          line.chomp!
-          if match = regex.match(line)
-            fields.zip(match.captures) { |field,value|
-              hash[field] = value
-          }
-            name = hash[:name]
-            version = hash[:ensure]
-            hash[:provider] = self.name
-            packages << new(hash)
-            hash = {}
-          else
-            warning("Failed to match line %s" % line)
-          end
-        }
+      process.each_line do |line|
+        line.chomp!
+        if line.empty?; next; end
+        values = line.split(' ')
+        packages << new({ :name => values[0], :ensure => values[1], :provider => self.name })
       end
-    rescue Puppet::ExecutionFailure
-      return nil
     end
     packages
   end
 
   def latestcmd
-    [command(:chocolatey), ' version ' + @resource[:name][/\A\S*/] + ' ^| % { \"{0}=={1}\" -f $_.Name, $_.Latest }']
+    [command(:chocolatey), ' version ' + @resource[:name][/\A\S*/] + ' | findstr /R "latest" | findstr /V "latestCompare" ']
   end
 
   def latest
     packages = []
+    execpipe(latestcmd()) do |process|
+      break if process.eof?
 
-    begin
-      output = execpipe(latestcmd()) do |process|
-        puts "#{output}"
-        regex = %r{^([^=]+)==([^=]+)$}
-        fields = [:name, :latest]
-        hash = {}
-
-        process.each_line { |line|
-          line.chomp!
-          if match = regex.match(line)
-            fields.zip(match.captures) { |field,value|
-              hash[field] = value
-          }
-            latest = hash[:latest]
-            hash[:provider] = latest
-            hash = {}
-            return latest
-          else
-            warning("Failed to match line %s" % line)
-          end
-        }
+      process.each_line do |line|
+        line.chomp!
+        if line.empty?; next; end
+        # Example: ( latest        : 2013.08.19.155043 )
+        values = line.split(':').collect(&:strip).delete_if(&:empty?)
+        return values[1]
       end
-    rescue Puppet::ExecutionFailure
-      return nil
     end
     packages
   end
